@@ -339,6 +339,31 @@ fn vk_with_oversized_log_circuit_size_returns_invalid_parameters() {
     ));
 }
 
+#[test]
+fn vk_with_degenerate_log_circuit_size_returns_invalid_parameters() {
+    // log_circuit_size 1 and 2 make the ZK row-disabling factor identically
+    // zero, so the relation term vanishes from the final sumcheck check.
+    // Barretenberg never emits such VKs; they are rejected on load
+    // (REPORT.md §8 #1).
+    for d in [1u8, 2] {
+        let env = test_env();
+        let f = Fixture::load("simple_circuit");
+        let mut bad_vk = f.vk.clone();
+        // circuit_size = 2^d at bytes 0..8, log_circuit_size = d at bytes 8..16.
+        let n: u64 = 1 << d;
+        bad_vk[..8].copy_from_slice(&n.to_be_bytes());
+        bad_vk[8..16].copy_from_slice(&(d as u64).to_be_bytes());
+        let vk = Bytes::from_slice(&env, &bad_vk);
+        assert!(
+            matches!(
+                UltraHonkVerifier::new(&env, &vk),
+                Err(VkLoadError::InvalidParameters)
+            ),
+            "log_circuit_size = {d} must be rejected"
+        );
+    }
+}
+
 // =========================================================================
 // 7. Phase 3.1 Fixture circuits
 // =========================================================================

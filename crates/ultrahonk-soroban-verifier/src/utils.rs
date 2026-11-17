@@ -399,7 +399,13 @@ pub fn load_vk_from_bytes(env: &Env, bytes: &Bytes) -> Result<VerificationKey, V
     let pub_inputs_offset = read_u64(bytes, &mut idx);
 
     // Validate structural parameters immediately after parsing.
-    if log_circuit_size == 0
+    // log_circuit_size 1 and 2 are rejected even though the arithmetic would
+    // work: in the ZK flavor the row-disabling factor
+    // 1 - prod_{i>=2} u_i is identically 0 for d < 3, so the relation term
+    // vanishes from the final sumcheck check and the proof would degenerate.
+    // Barretenberg never emits such VKs (circuits are padded well above 2^3),
+    // so rejecting them costs nothing (REPORT.md §8 #1).
+    if log_circuit_size < 3
         || log_circuit_size
             > u64::try_from(CONST_PROOF_SIZE_LOG_N).map_err(|_| VkLoadError::InvalidParameters)?
     {
