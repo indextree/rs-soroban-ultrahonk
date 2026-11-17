@@ -1,5 +1,16 @@
 # Cryptographic audit of `ultrahonk-soroban-verifier`
 
+> [!NOTE]
+> **Status (2026-11-17): fixed in this branch.** The Critical finding of §7 is
+> closed by the Libra boundary opening `A(1) = 0` in the Shplonk batch
+> (`zk_shplemini.rs`), with the matching prover change in
+> `forgery/bb-libra-boundary.patch`; the end-to-end forgery of `FORGERY.md`
+> is now rejected, along with every stock-format ZK proof. Finding §8 #1
+> (`log_circuit_size` 1 and 2) is rejected at VK load, and §8 #6 (stale doc
+> comments) was already corrected upstream of this branch. §8 #2–5 are
+> informational and remain documented below. This report is otherwise kept as
+> written against commit `de1dfa7`.
+
 | Scope | |
 |---|---|
 | **Target** | `crates/ultrahonk-soroban-verifier` |
