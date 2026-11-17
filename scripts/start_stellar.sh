@@ -3,10 +3,10 @@ set -e
 
 source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
-echo -e "${BLUE}Starting Stellar Protocol 27 localnet container ($STELLAR_CONTAINER_NAME)...${NC}"
+echo -e "${BLUE}Starting Stellar Protocol 28 localnet container ($STELLAR_CONTAINER_NAME)...${NC}"
 stellar container start \
   -t testing \
-  --protocol-version 27 \
+  --protocol-version 28 \
   --name "$STELLAR_CONTAINER_NAME" \
   --limits unlimited \
   "$@"
