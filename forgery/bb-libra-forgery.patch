@@ -1,0 +1,139 @@
+--- pristine/aztec-packages-0.87.0/barretenberg/cpp/src/barretenberg/sumcheck/sumcheck.hpp	2025-05-21 04:23:13
++++ b/barretenberg/cpp/src/barretenberg/sumcheck/sumcheck.hpp	2026-11-17 01:58:59
+@@ -5,6 +5,7 @@
+ // =====================
+ 
+ #pragma once
++#include <cstdlib>
+ #include "barretenberg/honk/library/grand_product_delta.hpp"
+ #include "barretenberg/polynomials/polynomial_arithmetic.hpp"
+ #include "barretenberg/sumcheck/sumcheck_output.hpp"
+@@ -292,6 +293,33 @@
+ 
+         multivariate_challenge.reserve(multivariate_d);
+         size_t round_idx = 0;
++
++        // ==== Libra forgery mode (env BB_FORGE_LIBRA=1) ====
++        // The verifier's only per-round constraint on the sent univariate is
++        // S_i(0) + S_i(1) = T_i. Replace every round univariate by the constant
++        // T_i / 2 and halve the running fake target, so the fake telescoped
++        // value after the last round is T_d = T_0 / 2^d with
++        // T_0 = libra_challenge * libra_total_sum. The honest univariate of the
++        // final round is recorded to recover R'(u) when solving for
++        // Libra:claimed_evaluation below. See REPORT.md section 7.
++        const bool forge_libra = (std::getenv("BB_FORGE_LIBRA") != nullptr);
++        const FF forge_one_half = FF(1) / FF(2);
++        FF forged_round_target =
++            forge_libra ? zk_sumcheck_data.libra_challenge * zk_sumcheck_data.libra_total_sum : FF(0);
++        SumcheckRoundUnivariate honest_final_round_univariate;
++        auto apply_libra_forgery = [&](const size_t forgery_round_index, SumcheckRoundUnivariate& univariate) {
++            if (!forge_libra) {
++                return;
++            }
++            if (forgery_round_index == multivariate_d - 1) {
++                honest_final_round_univariate = univariate;
++            }
++            for (size_t k = 0; k < Flavor::BATCHED_RELATION_PARTIAL_LENGTH; k++) {
++                univariate.value_at(k) = forged_round_target * forge_one_half;
++            }
++            forged_round_target = forged_round_target * forge_one_half;
++        };
++
+         // In the first round, we compute the first univariate polynomial and populate the book-keeping table of
+         // #partially_evaluated_polynomials, which has \f$ n/2 \f$ rows and \f$ N \f$ columns. When the Flavor has ZK,
+         // compute_univariate also takes into account the zk_sumcheck_data.
+@@ -302,6 +330,7 @@
+                                                          alpha,
+                                                          zk_sumcheck_data,
+                                                          row_disabling_polynomial);
++        apply_libra_forgery(round_idx, round_univariate);
+         // Initialize the partially evaluated polynomials which will be used in the following rounds.
+         // This will use the information in the structured full polynomials to save memory if possible.
+         partially_evaluated_polynomials = PartiallyEvaluatedMultivariates(full_polynomials, multivariate_n);
+@@ -346,6 +375,7 @@
+                                                         alpha,
+                                                         zk_sumcheck_data,
+                                                         row_disabling_polynomial);
++            apply_libra_forgery(round_idx, round_univariate);
+             if constexpr (!IsGrumpkinFlavor<Flavor>) {
+                 // Place evaluations of Sumcheck Round Univariate in the transcript
+                 transcript->send_to_verifier("Sumcheck:univariate_" + std::to_string(round_idx), round_univariate);
+@@ -400,6 +430,18 @@
+         FF libra_evaluation = zk_sumcheck_data.constant_term;
+         for (const auto& libra_eval : zk_sumcheck_data.libra_evaluations) {
+             libra_evaluation += libra_eval;
++        }
++        if (forge_libra) {
++            // The honest final-round univariate evaluated at u_{d-1} equals
++            // R'(u) + libra_challenge * libra_evaluation, where R'(u) is the
++            // row-disabled relation value at the (fake-derived) sumcheck
++            // challenge. The verifier's final check demands
++            // R'(u) + libra_challenge * s == T_d with T_d the fake telescoped
++            // target (forged_round_target). Solve it for s.
++            const FF honest_final_target =
++                honest_final_round_univariate.evaluate(multivariate_challenge[multivariate_d - 1]);
++            libra_evaluation = (forged_round_target - honest_final_target) / zk_sumcheck_data.libra_challenge +
++                               libra_evaluation;
+         }
+         transcript->send_to_verifier("Libra:claimed_evaluation", libra_evaluation);
+ 
+--- pristine/aztec-packages-0.87.0/barretenberg/cpp/src/barretenberg/commitment_schemes/small_subgroup_ipa/small_subgroup_ipa.cpp	2025-05-21 04:23:13
++++ b/barretenberg/cpp/src/barretenberg/commitment_schemes/small_subgroup_ipa/small_subgroup_ipa.cpp	2026-11-17 01:59:34
+@@ -21,6 +21,7 @@
+ #include "barretenberg/translator_vm/translator_flavor.hpp"
+ 
+ #include <array>
++#include <cstdlib>
+ #include <vector>
+ 
+ namespace bb {
+@@ -254,6 +255,27 @@
+             grand_sum_lagrange_coeffs[prev_idx] +
+             challenge_polynomial_lagrange.at(prev_idx) * concatenated_lagrange_form.at(prev_idx);
+     };
++
++    // ==== Libra forgery mode (env BB_FORGE_LIBRA=1) ====
++    // The SmallSubgroupIPA identity checked by the verifier,
++    //   L_1(X)A(X) + (X - g^-1)(A(gX) - A(X) - F(X)G(X)) + L_last(X)(A(X) - s) = Z_H(X) Q(X),
++    // has a one-dimensional kernel at X = 1: the boundary constraint A(1) = 0
++    // is not enforced separately (see REPORT.md section 7). Shift A along the
++    // kernel vector so that A(g^-1) equals the claimed inner product s instead
++    // of the true <F, G>:
++    //   A(1)   += delta_s * (g - 1)
++    //   A(g^i) -= delta_s                 for i >= 1
++    // The step relation A(g^{i+1}) = A(g^i) + F(g^i)G(g^i) still holds for
++    // i >= 1, and the value at X = 1 still satisfies the combined equation
++    // A(1) + (1 - g^-1)(A(g) - A(1) - F(1)G(1)) = 0, so the left-hand side of the
++    // identity vanishes on all of H and the quotient Q stays exact.
++    if (std::getenv("BB_FORGE_LIBRA") != nullptr) {
++        const FF delta_s = grand_sum_lagrange_coeffs[SUBGROUP_SIZE - 1] - claimed_inner_product;
++        grand_sum_lagrange_coeffs[0] += delta_s * (subgroup_generator - FF(1));
++        for (size_t idx = 1; idx < SUBGROUP_SIZE; idx++) {
++            grand_sum_lagrange_coeffs[idx] -= delta_s;
++        }
++    }
+ 
+     //  Get the coefficients in the monomial basis
+     grand_sum_polynomial_unmasked =
+--- pristine2/aztec-packages-0.87.0/barretenberg/cpp/src/barretenberg/transcript/transcript.hpp	2025-05-21 04:23:13
++++ b/barretenberg/cpp/src/barretenberg/transcript/transcript.hpp	2026-11-17 02:02:39
+@@ -237,7 +237,7 @@
+      */
+     template <typename T> void serialize_to_buffer(const T& element, Proof& proof_data)
+     {
+-        auto element_frs = TranscriptParams::template convert_to_bn254_frs(element);
++        auto element_frs = TranscriptParams::template convert_to_bn254_frs<>(element);
+         proof_data.insert(proof_data.end(), element_frs.begin(), element_frs.end());
+     }
+     /**
+--- pristine2/aztec-packages-0.87.0/barretenberg/cpp/src/barretenberg/stdlib_circuit_builders/circuit_builder_base_impl.hpp	2025-05-21 04:23:13
++++ b/barretenberg/cpp/src/barretenberg/stdlib_circuit_builders/circuit_builder_base_impl.hpp	2026-11-17 02:12:11
+@@ -122,7 +122,7 @@
+ 
+     if (variable_names.contains(first_idx)) {
+         if (cur_idx != REAL_VARIABLE) {
+-            variable_names.extract(cur_idx);
++            [[maybe_unused]] auto extracted = variable_names.extract(cur_idx);
+         }
+         return;
+     }
