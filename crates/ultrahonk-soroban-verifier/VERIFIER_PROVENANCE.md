@@ -157,8 +157,16 @@ The fixed proof layout is `ZK_PROOF_FIELDS = 507`
 
 The verifier checks the order-256 Libra subgroup identity, batches the hiding
 polynomial at `rho^0`, starts ordinary entity claims at `rho^1`, and batches
-the four Libra openings at fixed Shplonk powers `nu^58` through `nu^61`
-before the final KZG pairing.
+the Libra openings at fixed Shplonk powers before the final KZG pairing,
+including the boundary opening of the grand sum at `1` (see `REPORT.md` §7).
+
+Two properties inherited from the reference that reviewers should know
+(`REPORT.md` §8 #4–5): the ZK row-disabling factor leaves the last four rows
+of the circuit unconstrained by design — v0.87 reserves those rows in both
+flavors and the VKs are byte-identical across flavors, so this is safe for
+bb-generated VKs; and every Fiat–Shamir challenge is 128 bits (or about 126
+bits for the high half), a Barretenberg design choice that sizes the
+soundness error terms accordingly.
 
 ## Intentional exclusions
 
@@ -223,10 +231,10 @@ not, and the deserialization entry was therefore the one re-derived most careful
 The ZK flavor was reviewed equation-by-equation in 2026-11 (`REPORT.md`),
 including the nine-point masked sumcheck, the Libra SmallSubgroupIPA
 consistency identity, the Gemini hiding claim, and the fixed Shplonk powers for
-the Libra openings. That review found the ZK flavor not sound as specified:
-the SmallSubgroupIPA identity leaves the grand-sum boundary `A(1)` unconstrained
-(§7), and the end-to-end forgery committed as `FORGERY.md` demonstrates the
-gap against this verifier.
+the Libra openings. The one soundness gap that review found — the unbound
+`A(1)` boundary of the grand sum — is closed by the extra Shplonk boundary
+opening described in the ZK section above, and the end-to-end forgery that
+demonstrated the gap is kept as a rejection test (`FORGERY.md`).
 
 ---
 
@@ -243,6 +251,7 @@ its accepted proof language explicitly rather than leaving it implicit:
 | Public inputs | **Canonical only** — rejected at or above `r` | Stricter than a bare reduction; see note 3 |
 | Padded Gemini evaluations | **Zero required** — rejected at parse time (slots `log_n..28`) | Matches bb: bb binds these via its constant-term accumulator and rejects non-zero |
 | Padded sumcheck rounds, unused fold commitments | Unconstrained | Matches bb, which masks both |
+| Libra grand-sum boundary | **`A(1) = 0` opened in the Shplonk batch** | Deliberate hardening beyond stock v0.87.0 (see `REPORT.md` §7.4); requires the patched prover |
 
 Two consequences a reader must not have to infer:
 
@@ -283,8 +292,8 @@ Two consequences a reader must not have to infer:
    Reduce before calling.
 
 The contract is therefore: **canonical encodings throughout the verified tuple —
-proof and public inputs — zero-padded Gemini evaluations, and bb-compatible
-padding elsewhere.**
+proof and public inputs — zero-padded Gemini evaluations, a sound Libra grand-sum
+boundary, and bb-compatible padding elsewhere.**
 
 Note that proof bytes remain non-unique as a statement identifier even under a fully
 canonical policy: an active prover can still vary padding. Do not key deduplication,
@@ -352,7 +361,7 @@ Additional validation when upgrading Barretenberg:
 3. Recheck proof layouts and every transcript absorption boundary.
 4. Recheck 8- and 9-point barycentric constants.
 5. Recheck the row-disabling factor, Libra subgroup constants and consistency identity.
-6. Recheck fixed Shplonk powers for the four Libra claims.
+6. Recheck fixed Shplonk powers for the Libra claims, including the boundary opening at `1`.
 7. Run `cargo test --workspace --all-features` and the Soroban Wasm build.
 
 ---
