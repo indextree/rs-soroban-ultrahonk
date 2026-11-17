@@ -30,6 +30,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ROOT}/.." && pwd)"
 
+# GENERATE_ZK: regenerate the companion UltraKeccakZK artifacts under
+# target/zk. Defaults to 0: the committed ZK fixtures are used, because the
+# soundness fix for the Libra SmallSubgroupIPA boundary (REPORT.md §7) adds a
+# fifth Shplonk claim that stock Barretenberg v0.87.0 does not produce. To
+# regenerate, set GENERATE_ZK=1 and point BB at a binary built with
+# forgery/bb-libra-boundary.patch applied (it self-identifies through
+# `bb --version` as "0.87.0-libra-boundary").
+GENERATE_ZK="${GENERATE_ZK:-0}"
+
+zk_capable_bb() {
+  "${BB_BIN}" --version 2>/dev/null | grep -q 'libra-boundary'
+}
+
 export PATH="$HOME/.nargo/bin:$HOME/.bb/bin:$PATH"
 
 # Resolve the binaries that will actually be used for every circuit, honouring the
@@ -191,26 +204,32 @@ build_circuit() {
     --output_format bytes_and_fields
 
   # Generate a matching UltraKeccakZK proof alongside the legacy non-ZK
-  # fixture. The verification key is flavor-independent in bb v0.87, but is
-  # emitted into the companion directory to keep each fixture self-contained.
-  if [[ "${GENERATE_ZK:-1}" != "0" ]]; then
-    echo "=== Building ${name} (UltraKeccakZK) ==="
-    mkdir -p target/zk
-    "${bb_bin}" prove \
-      --scheme ultra_honk \
-      --oracle_hash keccak \
-      --zk \
-      --bytecode_path "${json}" \
-      --witness_path "${gz}" \
-      --output_path target/zk \
-      --output_format bytes_and_fields
+  # fixture. Requires the Libra-boundary-patched prover (see GENERATE_ZK at
+  # the top of this script); the verifier rejects stock v0.87.0 ZK proofs
+  # because they lack the A(1) = 0 boundary opening in the Shplonk batch.
+  if [[ "${GENERATE_ZK}" != "0" ]]; then
+    if ! zk_capable_bb; then
+      echo "GENERATE_ZK=1 requires a bb built with forgery/bb-libra-boundary.patch" >&2
+      echo "(current '${BB_BIN}' is not Libra-boundary patched); keeping committed fixtures" >&2
+    else
+      echo "=== Building ${name} (UltraKeccakZK) ==="
+      mkdir -p target/zk
+      "${bb_bin}" prove \
+        --scheme ultra_honk \
+        --oracle_hash keccak \
+        --zk \
+        --bytecode_path "${json}" \
+        --witness_path "${gz}" \
+        --output_path target/zk \
+        --output_format bytes_and_fields
 
-    "${bb_bin}" write_vk \
-      --scheme ultra_honk \
-      --oracle_hash keccak \
-      --bytecode_path "${json}" \
-      --output_path target/zk \
-      --output_format bytes_and_fields
+      "${bb_bin}" write_vk \
+        --scheme ultra_honk \
+        --oracle_hash keccak \
+        --bytecode_path "${json}" \
+        --output_path target/zk \
+        --output_format bytes_and_fields
+    fi
   fi
 
   if [[ "${name}" == "tornado" && "${GENERATE_PROVER:-1}" != "0" ]]; then
@@ -230,7 +249,7 @@ build_circuit() {
       --witness_path "${gz}" \
       --output_path target/e2e \
       --output_format bytes_and_fields
-    if [[ "${GENERATE_ZK:-1}" != "0" ]]; then
+    if [[ "${GENERATE_ZK}" != "0" ]] && zk_capable_bb; then
       mkdir -p target/e2e/zk
       "${bb_bin}" prove \
         --scheme ultra_honk \

@@ -54,9 +54,14 @@ second self-contained set is written under `target/zk/` using `bb prove --zk`:
 - `public_inputs`
 - matching `*_fields.json` files
 
-Set `GENERATE_ZK=0` to skip companion ZK generation. Existing `target/zk`
-artifacts are not refreshed in that mode; do not use them as outputs of the
-current build.
+The ZK fixtures are committed to the repository: the verifier's Libra
+soundness fix adds the fixed Shplonk claim `A(1) = 0`
+(`forgery/bb-libra-boundary.patch`, REPORT.md §7), which stock Barretenberg
+v0.87.0 does not produce, so a plain `bb prove --zk` run yields proofs the
+verifier rejects. To regenerate the ZK artifacts, build bb with the boundary
+patch and run with `GENERATE_ZK=1 BB=<patched bb>`; the patched binary
+self-identifies as `0.87.0-libra-boundary`. With `GENERATE_ZK=0` (the
+default) the committed `target/zk` fixtures are used untouched.
 
 ## Add A Circuit
 
