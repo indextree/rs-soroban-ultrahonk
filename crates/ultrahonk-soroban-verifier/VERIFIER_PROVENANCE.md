@@ -1,17 +1,19 @@
 # Verifier Provenance
 
-This document records the 1:1 correspondence between the Rust Soroban
-`ultrahonk-soroban-verifier` and the Barretenberg (BB) native UltraHonk verifier.
-It is intended as a permanent audit trail so that future maintainers can
-re-validate the implementation when BB is upgraded or when bugs are suspected.
+This document records the protocol variants implemented by
+`ultrahonk-soroban-verifier` and the Barretenberg sources against which they
+must be checked.
 
-- **Supported toolchain (target):** `aztec-packages` tag **v0.87.0**
+- **Supported toolchain (target):** `aztec-packages` tag **v0.87.0**,
+  commit `9081b0ed38c43c120afb7c80f8f6cd418ca5ad70`
 - **Port lineage (origin):** `aztec-packages` tag **v0.82.2**, inherited from the
   original `rs-soroban-ultrahonk`
-- **Implemented flavor:** **`UltraKeccakFlavor`** — non-ZK, Keccak transcript
+- **Implemented flavors:** **`UltraKeccakFlavor`** (non-ZK) and
+  **`UltraKeccakZKFlavor`** (ZK), both Keccak transcript
 - **Audit date:** 2026-05-28 (internal); OpenZeppelin external audit
-  2026-08-10 → 2026-08-28
-- **Scope:** Non-ZK, non-recursive, native BN254 UltraHonk path only
+  2026-08-10 → 2026-08-28 (non-ZK flavor); ZK cryptographic review 2026-11
+  (`REPORT.md`, forgery in `FORGERY.md`)
+- **Scope:** non-recursive, native BN254 UltraHonk paths only
 
 > **Version note — lineage versus target.** These are two different facts and
 > earlier revisions of this document conflated them by recording only the first.
@@ -22,54 +24,54 @@ re-validate the implementation when BB is upgraded or when bugs are suspected.
 > starting point for anyone tracing a line of this crate back to its origin.
 >
 > *Target:* the serialization surface the crate actually parses is the `v0.87.0`
-> default layout — 456 field elements, being a 440-element proof body plus the
-> 16-element pairing-point object. `v0.82.2` emits that same layout only when
-> invoked as `bb prove -s ultra_honk --oracle_hash keccak --init_kzg_accumulator`.
+> default layout — 456 field elements for the non-ZK flavor (440-element proof
+> body plus the 16-element pairing-point object) and 507 field elements for the
+> ZK flavor. `v0.82.2` emits the non-ZK layout only when invoked as
+> `bb prove -s ultra_honk --oracle_hash keccak --init_kzg_accumulator`.
 > Both versions therefore *work*, each with its own verification key, but they
 > are not interchangeable.
 >
 > The supported toolchain is `v0.87.0`, and module headers now cite it for that
-> reason rather than because the code was written against it. Note that both
-> versions produce a 440-field proof body, so a version mismatch is **not**
-> detectable by the proof-length check — it surfaces later as a failed pairing
-> check. Proofs and verification keys must come from the same version.
+> reason rather than because the code was written against it. Note that
+> version mismatches are **not** detectable by the proof-length check alone —
+> they surface later as a failed pairing check. Proofs and verification keys
+> must come from the same version.
 
----
+## Supported flavors
 
-## 1. Supported Flavor & Limits
+| Flavor | Proof words | Support |
+|---|---:|---|
+| `UltraKeccakFlavor` | 456 | Full |
+| `UltraKeccakZKFlavor` | 507 | Full |
+| Recursive UltraHonk | — | Not supported |
+| Poseidon2 transcript | — | Not supported |
+| Mega/Goblin/Rollup/IPA | — | Not supported |
 
-The verifier implements **exactly** the following BB path:
+Both flavors use the same 1,760-byte verification-key encoding: four `u64`
+header fields followed by 27 BN254 G1 commitments. The proof length selects the
+flavor automatically; callers can also require an explicit `ProofFlavor`.
 
-| Feature                                          | Status            |
-|--------------------------------------------------|-------------------|
-| `UltraKeccakFlavor` (native BN254, non-ZK)        | ✅ Full support    |
-| Keccak-256 transcript                            | ✅ Full support    |
-| Non-ZK sumcheck                                  | ✅ Full support    |
-| 26 subrelations (8 families)                     | ✅ Full support    |
-| Shplemini batch-opening (Gemini + Shplonk + KZG) | ✅ Full support    |
-| UltraZKFlavor (hiding polynomial, Libra)         | ❌ Not implemented |
-| Recursive / stdlib verifier                      | ❌ Not implemented |
-| Mega / Goblin flavors                            | ❌ Not implemented |
-| Rollup / IPA (Grumpkin)                          | ❌ Not implemented |
-| Poseidon2 transcript                             | ❌ Not implemented |
+## Common protocol
 
-**Constants aligned with BB v0.87.0:**
+The two flavors share:
 
-| Constant                          | Value | BB Source          |
-|-----------------------------------|-------|--------------------|
-| `CONST_PROOF_SIZE_LOG_N`          | 28    | `stdlib_circuit_builders/ultra_flavor.hpp` |
-| `NUMBER_OF_SUBRELATIONS`          | 26    | `stdlib_circuit_builders/ultra_flavor.hpp` |
-| `BATCHED_RELATION_PARTIAL_LENGTH` | 8     | `stdlib_circuit_builders/ultra_flavor.hpp` |
-| `NUMBER_OF_ENTITIES`              | 40    | `stdlib_circuit_builders/ultra_flavor.hpp` |
-| `NUMBER_UNSHIFTED`                | 35    | `stdlib_circuit_builders/ultra_flavor.hpp` |
-| `NUMBER_TO_BE_SHIFTED`            | 5     | `stdlib_circuit_builders/ultra_flavor.hpp` |
-| `PAIRING_POINTS_SIZE`             | 16    | `stdlib_circuit_builders/ultra_flavor.hpp` |
-| `NUMBER_OF_ALPHAS`                | 25    | `stdlib_circuit_builders/ultra_flavor.hpp` |
-| `PROOF_FIELDS`                    | 456   | `stdlib_circuit_builders/ultra_flavor.hpp` (`PROOF_LENGTH_WITHOUT_PUB_INPUTS` + `PAIRING_POINTS_SIZE`) |
+- 16 proof-contained pairing-point-object field elements;
+- eight Ultra witness/lookup/permutation commitments;
+- 26 Ultra relations and 25 batching alphas;
+- 40 multilinear entity evaluations (35 unshifted, five shifted);
+- Gemini multilinear reduction, Shplonk batching, and BN254 KZG pairing;
+- Keccak Fiat-Shamir challenges split into 128-bit field challenges.
 
----
+Public inputs must use their unique big-endian BN254 scalar encoding. Values
+greater than or equal to the scalar modulus are rejected before transcript or
+proof checks so byte-oriented application logic (such as nullifier tracking)
+cannot observe aliases of the same circuit field element.
 
-## 2. Architecture Map
+Proof scalars are likewise required to be canonical. Proof commitments require
+zero padding in the `(lo136, hi118)` limb encoding, canonical base-field
+coordinates, and on-curve G1 points; VK commitments receive the same coordinate
+and curve checks. Malformed encodings return verifier/VK errors instead of
+reaching an MSM or pairing host trap.
 
 ```
 Rust Module                         BB Component (v0.87.0)
@@ -114,82 +116,67 @@ ec.rs            ─────────────────► Host bn2
                                     (same cryptographic primitives as BB native)
 ```
 
----
-
-## 3. Module-to-BB Function Mapping
-
-### 3.1 Transcript (`transcript.rs`)
-
-| Rust Function                                   | BB Equivalent                                                       |
-|-------------------------------------------------|---------------------------------------------------------------------|
-| `push_coord_halves` / `push_point`              | `transcript.hpp::add_element_frs_to_hash_buffer` (BN254 limb split) |
-| `split_challenge` / `split_challenge_from_be32` | `transcript.hpp::NativeTranscriptParams::split_challenge`           |
-| `hash_to_fr`                                    | `transcript.hpp::keccak_hash_uint256`                               |
-| `generate_eta_challenge`                        | `oink_verifier.cpp::execute_sorted_list_accumulator_round`          |
-| `generate_beta_and_gamma_challenges`            | `oink_verifier.cpp::execute_log_derivative_inverse_round`           |
-| `generate_alpha_challenges`                     | `oink_verifier.cpp::generate_alphas_round`                          |
-| `generate_gate_challenges`                      | `ultra_verifier.cpp::verify_proof`                                  |
-| `generate_sumcheck_challenges`                  | `sumcheck.hpp::SumcheckVerifier::verify`                            |
-| `generate_rho_challenge`                        | `shplemini.hpp` (`"rho"`)                                           |
-| `generate_gemini_r_challenge`                   | `shplemini.hpp` (`"Gemini:r"`)                                      |
-| `generate_shplonk_nu_challenge`                 | `shplemini.hpp` (`"Shplonk:nu"`)                                    |
-| `generate_shplonk_z_challenge`                  | `shplemini.hpp` (`"Shplonk:z"`)                                     |
-
-### 3.2 Verifier (`verifier.rs`)
-
-| Rust Function                | BB Equivalent                                         |
-|------------------------------|-------------------------------------------------------|
-| `UltraHonkVerifier::verify`  | `ultra_verifier.cpp::UltraVerifier_::verify_proof`    |
-| `compute_public_input_delta` | `grand_product_delta.hpp::compute_public_input_delta` |
-
-### 3.3 Sumcheck (`sumcheck.rs`)
-
-| Rust Function             | BB Equivalent                                                        |
-|---------------------------|----------------------------------------------------------------------|
-| `check_sum`               | `sumcheck_round.hpp::SumcheckVerifierRound::check_sum`               |
-| `compute_next_target_sum` | `sumcheck_round.hpp::SumcheckVerifierRound::compute_next_target_sum` |
-| `partially_evaluate_pow`  | `gate_separator.hpp::GateSeparatorPolynomial::partially_evaluate`    |
-| `verify_sumcheck`         | `sumcheck.hpp::SumcheckVerifier::verify`                             |
-
-### 3.4 Relations (`relations.rs`)
-
-| Rust Function                               | BB Equivalent                                                                   |
-|---------------------------------------------|---------------------------------------------------------------------------------|
-| `accumulate_arithmetic_relation`            | `ultra_arithmetic_relation.hpp::UltraArithmeticRelation::accumulate`            |
-| `accumulate_permutation_relation`           | `permutation_relation.hpp::UltraPermutationRelation::accumulate`                |
-| `accumulate_log_derivative_lookup_relation` | `logderiv_lookup_relation.hpp::LogDerivLookupRelation::accumulate`              |
-| `accumulate_delta_range_relation`           | `delta_range_constraint_relation.hpp::DeltaRangeConstraintRelation::accumulate` |
-| `accumulate_elliptic_relation`              | `elliptic_relation.hpp::EllipticRelation::accumulate`                           |
-| `accumulate_auxillary_relation`             | `auxiliary_relation.hpp::AuxiliaryRelation::accumulate`                         |
-| `accumulate_poseidon_external_relation`     | `poseidon2_external_relation.hpp::Poseidon2ExternalRelation::accumulate`        |
-| `accumulate_poseidon_internal_relation`     | `poseidon2_internal_relation.hpp::Poseidon2InternalRelation::accumulate`        |
-| `scale_and_batch_subrelations`              | `relations/utils.hpp::RelationUtils::scale_and_batch_elements`                  |
-| `accumulate_relation_evaluations`           | `sumcheck_round.hpp::compute_full_relation_purported_value`                     |
-
-### 3.5 Shplemini (`shplemini.rs`)
-
-| Rust Function      | BB Equivalent                                                    |
-|--------------------|------------------------------------------------------------------|
-| `verify_shplemini` | `shplemini.hpp::ShpleminiVerifier_::compute_batch_opening_claim` |
-
-### 3.6 Serialization (`utils.rs`)
-
 | Rust Function                          | BB Equivalent                                      |
 |----------------------------------------|----------------------------------------------------|
 | `load_proof`                           | `ultra_flavor.hpp:110` (`PROOF_LENGTH_WITHOUT_PUB_INPUTS`) + `:683-760` (`Transcript_::{de,}serialize_full_transcript`) — there is no `Proof` type |
+| `load_zk_proof`                        | `ultra_zk_flavor.hpp::Transcript_` (de)serialisation, 507-word layout |
 | `load_vk_from_bytes`                   | `ultra_keccak_flavor.hpp:132` (`UltraKeccakFlavor::VerificationKey::MSGPACK_FIELDS`) — **not** `UltraFlavor::VerificationKey` (`ultra_flavor.hpp:450-454`), which serialises a fifth header field |
 | `coord_to_halves_be` / `combine_limbs` | `field_conversion::calc_num_bn254_frs`             |
 
----
+## Non-ZK UltraKeccak
 
-## 4. Audit Findings & Resolutions
+| Rust | Barretenberg v0.87 |
+|---|---|
+| `transcript.rs` | `honk_contract.hpp::TranscriptLib` |
+| `sumcheck.rs` | non-ZK `SumcheckVerifier` / 8-value univariates |
+| `shplemini.rs` | non-ZK `ShpleminiVerifier_` |
 
-### 4.1 Fixed Issues
+The fixed proof layout is `PROOF_FIELDS = 456` (`PROOF_BYTES = 14,592`).
 
-| # | Finding                                                          | Severity | Fix                                                                                                                                                        |
-|---|------------------------------------------------------------------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1 | Hardcoded `pub_inputs_offset = 1` instead of reading from VK     | LOW      | Added `pub_inputs_offset: u64` to `VerificationKey`; parsed in `load_vk_from_bytes`; used dynamically in `verifier.rs`                                     |
-| 2 | Duplicate shifted commitments in Shplemini MSM (5 extra entries) | NOTE     | Merged shifted scalars into unshifted counterparts (matching BB `remove_repeated_commitments`); reduced MSM from 70 → 65 entries (~2M instruction savings) |
+## ZK UltraKeccak
+
+The ZK implementation follows `UltraKeccakZKFlavor` and the generated
+`honk_zk_contract.hpp` verifier.
+
+| Rust | Barretenberg v0.87 |
+|---|---|
+| `zk_types.rs`, `zk_utils.rs` | `ultra_zk_flavor.hpp::Transcript_`, ZK proof loader |
+| `zk_transcript.rs` | `honk_zk_contract.hpp::ZKTranscriptLib` |
+| `zk_sumcheck.rs` | ZK `SumcheckVerifier`, row-disabling polynomial |
+| `zk_shplemini.rs` | ZK `ShpleminiVerifier_`, `SmallSubgroupIPAVerifier` |
+
+The fixed proof layout is `ZK_PROOF_FIELDS = 507`
+(`ZK_PROOF_BYTES = 16,224`). Relative to the non-ZK proof it adds:
+
+- a commitment to concatenated Libra masking univariates and their claimed sum;
+- 9-value rather than 8-value sumcheck univariates;
+- the Libra evaluation used in the masked sumcheck identity;
+- grand-sum and quotient commitments for the SmallSubgroupIPA;
+- a Gemini hiding-polynomial commitment and evaluation;
+- four Libra opening evaluations.
+
+The verifier checks the order-256 Libra subgroup identity, batches the hiding
+polynomial at `rho^0`, starts ordinary entity claims at `rho^1`, and batches
+the four Libra openings at fixed Shplonk powers `nu^58` through `nu^61`
+before the final KZG pairing.
+
+## Intentional exclusions
+
+Recursive proofs are not supported. The 16 pairing-point-object limbs are
+included in the transcript and permutation public-input delta, but nested
+pairing accumulators are not reconstructed or aggregated. Only VKs for
+non-recursive circuits may be used.
+
+The implementation is version-specific. Proofs or VKs from another
+Barretenberg version must not be assumed compatible even when their lengths
+match.
+
+| Feature              | BB Component                      | Reason                                                     |
+|----------------------|-----------------------------------|------------------------------------------------------------|
+| Recursive verifier   | `stdlib/honk_verifier/`           | Circuit-native verification only; no recursive composition |
+| Mega / ECC / Goblin  | `mega_flavor.hpp`, `goblin/`      | Different flavor with ECC op wires, databus columns        |
+| Rollup / IPA         | `ultra_rollup_flavor.hpp`         | IPA claim handling, Grumpkin MSM                           |
+| Poseidon2 transcript  | `UltraFlavor` (poseidon2 variant) | Only Keccak-256 path is implemented                        |
 
 ### 4.2 Verified-Aligned Behaviours
 
@@ -232,6 +219,14 @@ not, and the deserialization entry was therefore the one re-derived most careful
 - **Relations:** All 26 subrelations across 8 families match exactly. Key constants verified: `neg_half`, `LIMB_SIZE = 1<<68`, `SUBLIMB_SHIFT = 1<<14`, `B_NEG = 17` (Grumpkin), Poseidon2 internal diagonal values.
 - **Shplemini:** Gemini challenge powers, batch inversion layout, Shplonk unshifted/shifted weights, batched evaluation accumulation, commitment order, Gemini fold reconstruction, constant-term accumulator, further folding scalars, dummy commitment padding, generator + quotient placement, KZG pairing check.
 - **Deserialization:** Proof byte offsets, VK header fields, G1 limb reconstruction, big-endian field decoding.
+
+The ZK flavor was reviewed equation-by-equation in 2026-11 (`REPORT.md`),
+including the nine-point masked sumcheck, the Libra SmallSubgroupIPA
+consistency identity, the Gemini hiding claim, and the fixed Shplonk powers for
+the Libra openings. That review found the ZK flavor not sound as specified:
+the SmallSubgroupIPA identity leaves the grand-sum boundary `A(1)` unconstrained
+(§7), and the end-to-end forgery committed as `FORGERY.md` demonstrates the
+gap against this verifier.
 
 ---
 
@@ -288,8 +283,8 @@ Two consequences a reader must not have to infer:
    Reduce before calling.
 
 The contract is therefore: **canonical encodings throughout the verified tuple —
-proof and public inputs — zero-padded Gemini evaluations, and bb-compatible padding
-elsewhere.**
+proof and public inputs — zero-padded Gemini evaluations, and bb-compatible
+padding elsewhere.**
 
 Note that proof bytes remain non-unique as a statement identifier even under a fully
 canonical policy: an active prover can still vary padding. Do not key deduplication,
@@ -297,19 +292,7 @@ replay protection or nullifiers on raw proof bytes.
 
 ---
 
-## 5. Out-of-Scope Items (Intentionally Excluded)
-
-| Feature              | BB Component                      | Reason                                                     |
-|----------------------|-----------------------------------|------------------------------------------------------------|
-| ZK (UltraZKFlavor)   | `ultra_zk_flavor.hpp`             | Hiding polynomial, Libra sumcheck not implemented          |
-| Recursive verifier   | `stdlib/honk_verifier/`           | Circuit-native verification only; no recursive composition |
-| Mega / ECC / Goblin  | `mega_flavor.hpp`, `goblin/`      | Different flavor with ECC op wires, databus columns        |
-| Rollup / IPA         | `ultra_rollup_flavor.hpp`         | IPA claim handling, Grumpkin MSM                           |
-| Poseidon2 transcript | `UltraFlavor` (poseidon2 variant) | Only Keccak-256 path is implemented                        |
-
----
-
-## 6. Test Fixtures
+## 6. Test Fixtures and generation
 
 All verification is validated against BB-generated fixtures in `circuits/`:
 
@@ -319,10 +302,17 @@ All verification is validated against BB-generated fixtures in `circuits/`:
 | `fib_chain`      | 2^12         | Fibonacci sequence in-circuit        |
 | `small_circuit`  | 2^12         | Minimal gate set                     |
 | `lookup_heavy`   | 2^13         | Heavy lookup-table usage             |
-| `range_heavy`    | 2^13         | Heavy range-check usage              |
+| `range_heavy`    | 2^13         | Heavy range-check usage               |
 | `many_pubs`      | 2^12         | Many public inputs                   |
 | `identity`       | 2^12         | Identity circuit (contract e2e)      |
 | `tornado`        | 2^13         | Tornado-style circuit (contract e2e) |
+
+`circuits/scripts/build_all.sh` generates both variants for every circuit:
+
+- `circuits/<name>/target/{proof,vk,public_inputs}` — non-ZK;
+- `circuits/<name>/target/zk/{proof,vk,public_inputs}` — ZK.
+
+Set `GENERATE_ZK=0` only when the companion ZK fixtures are not needed.
 
 Test commands:
 ```bash
@@ -345,15 +335,25 @@ When Barretenberg is upgraded, follow these steps to validate the Rust verifier:
 
 1. **Update the BB source tree** to the new tag and note the old→new tag in this file.
 2. **Check constants** in `types.rs` against `ultra_flavor.hpp`. Any change to `NUM_ALL_ENTITIES`, `NUM_PRECOMPUTED`, `NUM_WITNESS`, `NUM_SHIFTED`, `NUM_SUBRELATIONS`, `BATCHED_RELATION_PARTIAL_LENGTH`, or `CONST_PROOF_SIZE_LOG_N` is **CRITICAL**.
-3. **Check proof size** in `lib.rs` (`PROOF_FIELDS`, `PROOF_BYTES`) against
+3. **Check proof size** in `lib.rs` (`PROOF_FIELDS`, `PROOF_BYTES`, `ZK_PROOF_FIELDS`, `ZK_PROOF_BYTES`) against
    `stdlib_circuit_builders/ultra_flavor.hpp::PROOF_LENGTH_WITHOUT_PUB_INPUTS`, remembering
    that `PROOF_FIELDS` adds `PAIRING_POINTS_SIZE` on top of it.
-4. **Audit transcript** (`transcript.rs`) against `transcript.hpp` and `oink_verifier.cpp`. Challenge labels are **not** hashed in either codebase, but the *order* of absorptions must match exactly.
-5. **Audit sumcheck** (`sumcheck.rs`) against `sumcheck.hpp`. Verify barycentric weights if `BATCHED_RELATION_PARTIAL_LENGTH` changes.
+4. **Audit transcript** (`transcript.rs`, `zk_transcript.rs`) against `transcript.hpp` and `oink_verifier.cpp`. Challenge labels are **not** hashed in either codebase, but the *order* of absorptions must match exactly.
+5. **Audit sumcheck** (`sumcheck.rs`, `zk_sumcheck.rs`) against `sumcheck.hpp`. Verify barycentric weights if `BATCHED_RELATION_PARTIAL_LENGTH` changes.
 6. **Audit relations** (`relations.rs`) against the 8 relation headers. Even a single coefficient change breaks verification.
-7. **Audit Shplemini** (`shplemini.rs`) against `shplemini.hpp`. The MSM layout is especially fragile.
+7. **Audit Shplemini** (`shplemini.rs`, `zk_shplemini.rs`) against `shplemini.hpp` and `small_subgroup_ipa.hpp`. The MSM layout is especially fragile.
 8. **Run the full test matrix** (`cargo test --workspace`) and all e2e scripts.
 9. **Update this file** with the new BB tag, any changed constants, and the new audit date.
+
+Additional validation when upgrading Barretenberg:
+
+1. Regenerate both proof variants with the pinned `nargo` and `bb` versions.
+2. Verify both variants with native `bb` and the Rust verifier.
+3. Recheck proof layouts and every transcript absorption boundary.
+4. Recheck 8- and 9-point barycentric constants.
+5. Recheck the row-disabling factor, Libra subgroup constants and consistency identity.
+6. Recheck fixed Shplonk powers for the four Libra claims.
+7. Run `cargo test --workspace --all-features` and the Soroban Wasm build.
 
 ---
 
@@ -367,7 +367,9 @@ When Barretenberg is upgraded, follow these steps to validate the Rust verifier:
 | **PPO**            | Pairing Point Object — 16 Fr values appended to public inputs in the permutation argument.                                                   |
 | **Gate separator** | Polynomial `pow_β = ∏((1−Xᵢ) + Xᵢ·βᵢ)` used to combine multiple relations into one sumcheck claim.                                           |
 | **Domain sep**     | The partial evaluation of `pow_β` at the sumcheck challenges, scaling each relation contribution.                                            |
+| **Libra**          | ZK sumcheck masking: a random multilinear polynomial whose claimed sum masks the relation sum.                                               |
+| **SmallSubgroupIPA** | The ZK argument binding the Libra claimed evaluation to committed grand-sum and quotient polynomials over the order-256 subgroup.           |
 
 ---
 
-*Last updated: 2026-09-04 — Barretenberg tag (target): v0.87.0*
+*Last updated: 2026-11-17 — Barretenberg tag (target): v0.87.0*

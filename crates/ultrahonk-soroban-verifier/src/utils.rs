@@ -17,8 +17,9 @@
 
 use crate::field::Fr;
 use crate::types::{
-    fr_is_canonical, G1Point, PointError, Proof, VerificationKey, BATCHED_RELATION_PARTIAL_LENGTH,
-    CONST_PROOF_SIZE_LOG_N, NUMBER_OF_ENTITIES, PAIRING_POINTS_SIZE,
+    fp_in_range, fr_is_canonical, G1Point, PointError, Proof, VerificationKey,
+    BATCHED_RELATION_PARTIAL_LENGTH, CONST_PROOF_SIZE_LOG_N, NUMBER_OF_ENTITIES,
+    PAIRING_POINTS_SIZE,
 };
 use crate::{VkLoadError, PROOF_BYTES};
 use core::array;
@@ -120,6 +121,81 @@ pub(crate) fn try_g1_from_proof_chunk128(env: &Env, b: &[u8; 128]) -> Result<G1P
 pub(crate) fn try_g1_at(env: &Env, blob: &[u8], idx: usize) -> Result<G1Point, PointError> {
     let o = idx * 128;
     try_g1_from_proof_chunk128(env, blob[o..o + 128].try_into().expect("g1_128"))
+}
+
+// ---------------------------------------------------------------------------
+// ZK blob-validation helpers.
+//
+// The ZK proof parser (`zk_utils`) decodes fixed-size sections in bulk. These
+// helpers validate a whole section (canonical scalar encodings, canonical G1
+// limb padding, on-curve points) before decoding it with the unchecked
+// constructors, mirroring what the per-element `try_*` functions do for the
+// non-ZK proof layout.
+// ---------------------------------------------------------------------------
+
+/// True when a blob consists only of canonical BN254 scalar encodings.
+#[inline]
+pub(crate) fn validate_fr_blob(blob: &[u8]) -> bool {
+    if !blob.len().is_multiple_of(32) {
+        return false;
+    }
+    blob.chunks_exact(32).all(|word| {
+        let word: &[u8; 32] = word.try_into().expect("32-byte scalar chunk");
+        Fr::is_canonical_bytes(word)
+    })
+}
+
+/// Validate a blob of four-word `(x_lo, x_hi, y_lo, y_hi)` G1 commitments,
+/// including the otherwise-unused limb padding and curve membership.
+pub(crate) fn validate_g1_proof_blob(env: &Env, blob: &[u8]) -> bool {
+    if !blob.len().is_multiple_of(128) {
+        return false;
+    }
+
+    blob.chunks_exact(128).all(|encoded| {
+        let x_lo: &[u8; 32] = encoded[0..32].try_into().expect("x low limb");
+        let x_hi: &[u8; 32] = encoded[32..64].try_into().expect("x high limb");
+        let y_lo: &[u8; 32] = encoded[64..96].try_into().expect("y low limb");
+        let y_hi: &[u8; 32] = encoded[96..128].try_into().expect("y high limb");
+
+        if !limbs_are_canonical(x_lo, x_hi) || !limbs_are_canonical(y_lo, y_hi) {
+            return false;
+        }
+
+        let x = combine_limbs(x_lo, x_hi);
+        let y = combine_limbs(y_lo, y_hi);
+        if !fp_in_range(&x) || !fp_in_range(&y) {
+            return false;
+        }
+        let point = G1Point::from_xy(env, &x, &y);
+        env.crypto().bn254().g1_is_on_curve(&point.0)
+    })
+}
+
+/// Decode one 32-byte big-endian word of an already-validated blob.
+#[inline]
+pub(crate) fn fr_word32(env: &Env, blob: &[u8], word_idx: usize) -> Fr {
+    let o = word_idx * 32;
+    Fr::from_array(env, blob[o..o + 32].try_into().expect("fr32"))
+}
+
+/// Decode one 128-byte G1 chunk of an already-validated blob.
+#[inline]
+pub(crate) fn g1_from_proof_chunk128(env: &Env, b: &[u8; 128]) -> G1Point {
+    let x_lo: &[u8; 32] = b[0..32].try_into().expect("x_lo");
+    let x_hi: &[u8; 32] = b[32..64].try_into().expect("x_hi");
+    let y_lo: &[u8; 32] = b[64..96].try_into().expect("y_lo");
+    let y_hi: &[u8; 32] = b[96..128].try_into().expect("y_hi");
+    let x = combine_limbs(x_lo, x_hi);
+    let y = combine_limbs(y_lo, y_hi);
+    G1Point::from_xy(env, &x, &y)
+}
+
+/// Decode the `point_idx`-th 128-byte G1 chunk of an already-validated blob.
+#[inline]
+pub(crate) fn g1_from_proof_blob_at(env: &Env, blob: &[u8], point_idx: usize) -> G1Point {
+    let o = point_idx * 128;
+    g1_from_proof_chunk128(env, blob[o..o + 128].try_into().expect("g1_128"))
 }
 
 /// Deserialize a `Proof` from its canonical byte representation.

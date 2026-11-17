@@ -18,6 +18,11 @@ use crate::{
     utils::{
         load_proof, load_vk_from_bytes, validate_gemini_padding, validate_public_inputs_canonical,
     },
+    zk_shplemini::verify_zk_shplemini,
+    zk_sumcheck::verify_zk_sumcheck,
+    zk_transcript::generate_zk_transcript,
+    zk_utils::load_zk_proof,
+    PROOF_BYTES, ZK_PROOF_BYTES,
 };
 use soroban_sdk::{Bytes, Env};
 
@@ -54,6 +59,32 @@ pub enum VerifyError {
     ShplonkFailed,
 }
 
+/// UltraHonk proof flavors accepted by this verifier.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ProofFlavor {
+    /// Barretenberg v0.87 `UltraKeccakFlavor` (non-zero-knowledge).
+    UltraKeccak,
+    /// Barretenberg v0.87 `UltraKeccakZKFlavor` (Libra + hiding polynomial).
+    UltraKeccakZk,
+}
+
+impl ProofFlavor {
+    pub const fn proof_bytes(self) -> usize {
+        match self {
+            Self::UltraKeccak => PROOF_BYTES,
+            Self::UltraKeccakZk => ZK_PROOF_BYTES,
+        }
+    }
+
+    pub fn from_proof_len(len: usize) -> Option<Self> {
+        match len {
+            PROOF_BYTES => Some(Self::UltraKeccak),
+            ZK_PROOF_BYTES => Some(Self::UltraKeccakZk),
+            _ => None,
+        }
+    }
+}
+
 /// A verifier bound to a Soroban environment and a validated verification key.
 ///
 /// Construct with [`Self::new`], then use [`Self::verify`] for proofs of the
@@ -87,6 +118,10 @@ impl UltraHonkVerifier {
     /// commitments. Use the binary output of the supported Barretenberg
     /// `write_vk` command, not its JSON field representation.
     ///
+    /// The v0.87 byte format has no recursion discriminator. Callers must not
+    /// supply a recursive VK: this verifier does not aggregate its pairing
+    /// accumulator.
+    ///
     /// The verifier retains a clone of the environment handle and the parsed key,
     /// so the input byte buffer does not need to outlive it.
     ///
@@ -105,10 +140,12 @@ impl UltraHonkVerifier {
         &self.vk
     }
 
-    /// Verify an UltraHonk proof against the loaded VK.
+    /// Verify an UltraKeccak or UltraKeccakZK proof against the loaded VK.
     ///
     /// Both byte buffers must belong to the environment passed to [`Self::new`].
-    /// `proof_bytes` must contain exactly [`crate::PROOF_BYTES`] bytes.
+    /// `proof_bytes` must contain exactly [`crate::PROOF_BYTES`] bytes for the
+    /// non-ZK flavor or [`crate::ZK_PROOF_BYTES`] bytes for the ZK flavor; the
+    /// flavor is selected by the exact proof length.
     /// `public_inputs_bytes` contains the circuit's public inputs in circuit
     /// order, each encoded as a canonical big-endian 32-byte field element.
     /// Do not prepend the proof's pairing-point object to the public inputs.
@@ -124,15 +161,14 @@ impl UltraHonkVerifier {
     ///
     /// Steps (matching BB verifier flow). The numbers match the `// n)` labels in
     /// the body, so a step traced by number lands on the block that performs it:
-    /// 1. Parse proof bytes (canonical G1 limbs, coordinates and scalars enforced
-    ///    at parse time; see VERIFIER_PROVENANCE.md §4.3).
-    /// 2. Reject non-zero padding in the unused Gemini evaluation slots.
-    /// 3. Validate the public inputs: 32-byte alignment, canonical encodings, and
-    ///    count against VK metadata.
-    /// 4. Generate Fiat–Shamir challenges (Oink rounds).
-    /// 5. Compute `public_inputs_delta` (grand-product permutation argument).
-    /// 6. Run sumcheck verification.
-    /// 7. Run Shplemini batch-opening (Gemini + Shplonk + KZG pairing check).
+    /// 1. Select the proof flavor from the exact proof length and validate public
+    ///    inputs against VK metadata.
+    /// 2. Parse and validate the canonical proof encoding (non-ZK also rejects
+    ///    non-zero padding in the unused Gemini evaluation slots).
+    /// 3. Generate Fiat–Shamir challenges (Oink rounds).
+    /// 4. Compute `public_inputs_delta` (grand-product permutation argument).
+    /// 5. Run sumcheck verification.
+    /// 6. Run Shplemini batch-opening (Gemini + Shplonk + KZG pairing check).
     ///
     /// BB: `ultra_verifier.cpp::UltraVerifier_::verify_proof`
     /// The verifier's stored environment handle is used throughout; callers must
@@ -142,17 +178,39 @@ impl UltraHonkVerifier {
         proof_bytes: &Bytes,
         public_inputs_bytes: &Bytes,
     ) -> Result<(), VerifyError> {
+        let flavor = ProofFlavor::from_proof_len(proof_bytes.len() as usize)
+            .ok_or(VerifyError::InvalidInput)?;
+        self.verify_with_flavor(proof_bytes, public_inputs_bytes, flavor)
+    }
+
+    /// Verify a proof while requiring an explicit flavor.
+    ///
+    /// Rejects proofs whose length does not match `flavor`, so a non-ZK
+    /// deployment cannot be handed a ZK proof (or vice versa) by mistake.
+    pub fn verify_with_flavor(
+        &self,
+        proof_bytes: &Bytes,
+        public_inputs_bytes: &Bytes,
+        flavor: ProofFlavor,
+    ) -> Result<(), VerifyError> {
+        if proof_bytes.len() as usize != flavor.proof_bytes() {
+            return Err(VerifyError::InvalidInput);
+        }
+        let provided = self.validate_public_inputs(public_inputs_bytes)?;
         let env = &self.env;
-        // 1) parse proof
-        let proof = load_proof(env, proof_bytes).map_err(|_| VerifyError::InvalidInput)?;
+        match flavor {
+            ProofFlavor::UltraKeccak => {
+                self.verify_non_zk(env, proof_bytes, public_inputs_bytes, provided)
+            }
+            ProofFlavor::UltraKeccakZk => {
+                self.verify_zk(env, proof_bytes, public_inputs_bytes, provided)
+            }
+        }
+    }
 
-        // 2) reject non-canonical padding in the unused Gemini evaluation slots.
-        // Done here rather than in `load_proof` because it needs log_circuit_size,
-        // which comes from the VK. Runs before transcript generation.
-        validate_gemini_padding(&proof, self.vk.log_circuit_size as usize)
-            .map_err(|_| VerifyError::InvalidInput)?;
-
-        // 3) validate public inputs (alignment, canonical encodings, count vs VK)
+    /// Validate the public inputs: 32-byte alignment, canonical encodings, and
+    /// count against VK metadata.
+    fn validate_public_inputs(&self, public_inputs_bytes: &Bytes) -> Result<u64, VerifyError> {
         if !public_inputs_bytes.len().is_multiple_of(32) {
             return Err(VerifyError::InvalidInput);
         }
@@ -167,8 +225,26 @@ impl UltraHonkVerifier {
         if expected != provided {
             return Err(VerifyError::InvalidInput);
         }
+        Ok(provided)
+    }
 
-        // 4) Fiat–Shamir transcript
+    fn verify_non_zk(
+        &self,
+        env: &Env,
+        proof_bytes: &Bytes,
+        public_inputs_bytes: &Bytes,
+        provided: u64,
+    ) -> Result<(), VerifyError> {
+        // 1) parse proof
+        let proof = load_proof(env, proof_bytes).map_err(|_| VerifyError::InvalidInput)?;
+
+        // 2) reject non-canonical padding in the unused Gemini evaluation slots.
+        // Done here rather than in `load_proof` because it needs log_circuit_size,
+        // which comes from the VK. Runs before transcript generation.
+        validate_gemini_padding(&proof, self.vk.log_circuit_size as usize)
+            .map_err(|_| VerifyError::InvalidInput)?;
+
+        // 3) Fiat–Shamir transcript
         let pis_total = provided + PAIRING_POINTS_SIZE as u64;
         let pub_inputs_offset = self.vk.pub_inputs_offset;
         let mut t = generate_transcript(
@@ -181,7 +257,7 @@ impl UltraHonkVerifier {
         )
         .map_err(|_| VerifyError::InvalidInput)?;
 
-        // 5) Public delta
+        // 4) Public delta
         t.rel_params.public_inputs_delta = Self::compute_public_input_delta(
             env,
             public_inputs_bytes,
@@ -193,11 +269,55 @@ impl UltraHonkVerifier {
         )
         .map_err(|_| VerifyError::InvalidInput)?;
 
-        // 6) Sum-check
+        // 5) Sum-check
         verify_sumcheck(env, &proof, &t, &self.vk).map_err(|_| VerifyError::SumcheckFailed)?;
 
-        // 7) Shplemini (Gemini + Shplonk + KZG)
+        // 6) Shplemini (Gemini + Shplonk + KZG)
         verify_shplemini(env, &proof, &self.vk, &t).map_err(|_| VerifyError::ShplonkFailed)?;
+
+        Ok(())
+    }
+
+    fn verify_zk(
+        &self,
+        env: &Env,
+        proof_bytes: &Bytes,
+        public_inputs_bytes: &Bytes,
+        provided: u64,
+    ) -> Result<(), VerifyError> {
+        let proof = load_zk_proof(env, proof_bytes).map_err(|_| VerifyError::InvalidInput)?;
+        let pis_total = provided + PAIRING_POINTS_SIZE as u64;
+        let pub_inputs_offset = self.vk.pub_inputs_offset;
+
+        // 3) Fiat–Shamir transcript (ZK flavor)
+        let mut transcript = generate_zk_transcript(
+            &self.env,
+            &proof,
+            public_inputs_bytes,
+            self.vk.circuit_size,
+            pis_total,
+            pub_inputs_offset,
+        )
+        .map_err(|_| VerifyError::InvalidInput)?;
+
+        // 4) Public delta
+        transcript.rel_params.public_inputs_delta = Self::compute_public_input_delta(
+            env,
+            public_inputs_bytes,
+            &proof.pairing_point_object,
+            &transcript.rel_params.beta,
+            &transcript.rel_params.gamma,
+            pub_inputs_offset,
+            self.vk.circuit_size,
+        )
+        .map_err(|_| VerifyError::InvalidInput)?;
+
+        // 5) ZK sum-check
+        verify_zk_sumcheck(env, &proof, &transcript, &self.vk)
+            .map_err(|_| VerifyError::SumcheckFailed)?;
+        // 6) ZK Shplemini (Gemini + Shplonk + KZG + Libra SmallSubgroupIPA)
+        verify_zk_shplemini(&self.env, &proof, &self.vk, &transcript)
+            .map_err(|_| VerifyError::ShplonkFailed)?;
 
         Ok(())
     }

@@ -29,3 +29,4 @@ scripts/invoke_ultrahonk/node_modules/
 
 # Environment overrides
 .env
+.DS_Store

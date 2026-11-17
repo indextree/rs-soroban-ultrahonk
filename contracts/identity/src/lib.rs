@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{contract, contracterror, contractimpl, symbol_short, Bytes, Env, Symbol};
-use ultrahonk_soroban_verifier::{UltraHonkVerifier, VkLoadError, PROOF_BYTES};
+use ultrahonk_soroban_verifier::{ProofFlavor, UltraHonkVerifier, VkLoadError};
 
 /// Identity verification contract.
 ///
@@ -65,7 +65,7 @@ impl IdentityContract {
     }
 
     pub fn prove_identity(env: Env, public_inputs: Bytes, proof_bytes: Bytes) -> Result<(), Error> {
-        if proof_bytes.len() as usize != PROOF_BYTES {
+        if proof_bytes.len() as usize != ProofFlavor::UltraKeccakZk.proof_bytes() {
             return Err(Error::ProofParseError);
         }
 
@@ -82,7 +82,7 @@ impl IdentityContract {
         })?;
 
         verifier
-            .verify(&proof_bytes, &public_inputs)
+            .verify_with_flavor(&proof_bytes, &public_inputs, ProofFlavor::UltraKeccakZk)
             .map_err(|_| Error::VerificationFailed)?;
 
         Ok(())

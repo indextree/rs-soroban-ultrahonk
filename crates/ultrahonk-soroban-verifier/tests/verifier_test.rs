@@ -107,3 +107,13 @@ fn g2_constants_are_distinct_points_not_negations() {
         "LHS_G2_BYTES must be the SRS element [x]_2, not the negated generator -[1]_2"
     );
 }
+
+#[test]
+fn simple_circuit_zk_proof_verifies() -> Result<(), String> {
+    run("../../circuits/simple_circuit/target/zk")
+}
+
+#[test]
+fn fib_chain_zk_proof_verifies() -> Result<(), String> {
+    run("../../circuits/fib_chain/target/zk")
+}

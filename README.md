@@ -45,6 +45,10 @@ For the helper scripts used to invoke verified transactions (`scripts/invoke_ult
 Docker is required to run the local Standalone Network container (`stellar container start`).
 - [Install Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine depending on your system.
 
+The local development and E2E workflows target **Stellar Protocol 27**. They
+start the `stellar/quickstart:testing` image with `--protocol-version 27` so
+RPC simulation and ledger execution use the same protocol generation.
+
 ### 6. `just` (task runner)
 We use [`just`](https://github.com/casey/just) as a convenient task runner for discoverability. Install it via cargo:
 ```bash
@@ -57,7 +61,7 @@ Once installed, run `just --list` to see all available commands.
 Run `just --list` at any time to see available commands. The common workflow is:
 
 ### 1. Start the Network
-Start a local Stellar network in a Docker container and configure your environment:
+Start a local Stellar Protocol 27 network in a Docker container and configure your environment:
 ```bash
 just start
 ```
@@ -71,7 +75,7 @@ just deploy
 *(The generated `CONTRACT_ID` is saved locally to `.contract_id`)*
 
 ### 3. Verify a Proof
-To simulate the verifier on-chain using the proofs generated in the previous step (these are **non-ZK** UltraHonk proofs — see the verifier crate README):
+To simulate the verifier on-chain using the proofs generated in the previous step (the default `target/proof` artifacts are **non-ZK** UltraHonk proofs; ZK artifacts live under `target/zk/` — see the verifier crate README):
 ```bash
 just verify
 ```
@@ -107,6 +111,15 @@ just e2e
 
 The underlying shell scripts in `scripts/` are still available if you prefer to use them directly.
 
+## Circuits
+
+All Noir circuits live under `/circuits/`. Each build emits legacy non-ZK
+artifacts under `circuits/<name>/target/` and UltraKeccakZK artifacts under
+`circuits/<name>/target/zk/`. The localnet and identity E2E scripts use the ZK
+artifacts by default.
+
+See [`circuits/README.md`](circuits/README.md) for the circuit layout, rebuild commands, and how to add a new circuit.
+
 ## Quickstart (testnet)
 
 The same flow runs against the Stellar public testnet — there is no Docker container to start or stop. Either run the orchestrator:
@@ -129,12 +142,6 @@ Notes:
 - Cost measurement (the JS report) is skipped on testnet by default because it extracts the source-account secret. Re-enable with `MEASURE_COSTS=1 just verify`. The default report is simulation-only; add `MEASURE_SUBMIT=1` to also submit a separate measurement transaction and print the actual `feeCharged` from the ledger (real cost, costs ~0.014 XLM per run).
 - `mainnet` is supported by config but `just fund` will refuse to call friendbot — fund the source account out-of-band before running `just deploy`.
 
-## Circuits
-
-All Noir circuits live under `/circuits/`. Each circuit keeps its source files and generated artifacts together, with build outputs under `circuits/<name>/target/`.
-
-See [`circuits/README.md`](circuits/README.md) for the circuit layout, rebuild commands, and how to add a new circuit.
-
 ## Advanced usage
 
 ### Use the JS helper script
@@ -145,7 +152,7 @@ Expects a dataset folder with `public_inputs`, `proof` (the VK is already on-cha
 cd scripts/invoke_ultrahonk
 npm install
 npx ts-node invoke_ultrahonk.ts invoke \
-  --dataset ../../circuits/simple_circuit/target \
+  --dataset ../../circuits/simple_circuit/target/zk \
   --contract-id $(cat ../../.contract_id) \
   --network local \
   --source-account alice \
@@ -193,6 +200,10 @@ onwards, which is on the release line.
 The report is committed as
 [`audits/2026-09-18-openzeppelin-ultrahonk-verifier-audit.pdf`](audits/2026-09-18-openzeppelin-ultrahonk-verifier-audit.pdf);
 [`audits/README.md`](audits/README.md) records its checksum and the audited revision.
+
+The ZK flavor extension is covered by the cryptographic review committed as
+[`REPORT.md`](REPORT.md) and the end-to-end forgery documented in
+[`FORGERY.md`](FORGERY.md).
 
 ## Publishing the verifier library
 

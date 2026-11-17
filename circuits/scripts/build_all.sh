@@ -2,7 +2,8 @@
 set -euo pipefail
 
 NOIR_VERSION="1.0.0-beta.9"
-BB_VERSION="v0.87.0"
+BB_VERSION="0.87.0"
+BB_RELEASE_TAG="v${BB_VERSION}"
 
 # Known-good SHA-256 digests for the Barretenberg release archives of ${BB_VERSION},
 # keyed by asset name. The download is fail-closed: an asset with no entry here and
@@ -62,21 +63,30 @@ assert_versions() {
 # is not exactly NOIR_VERSION/BB_VERSION. This differs from auto-installing the
 # pinned versions over whatever is present, but reaches the same guarantee: no
 # artifact is ever produced by an unpinned toolchain.
+
 install_nargo() {
-  if command -v nargo >/dev/null 2>&1; then return; fi
+  if command -v nargo >/dev/null 2>&1 \
+    && [[ "$(nargo --version)" == *"nargo version = ${NOIR_VERSION}"* ]]; then
+    return
+  fi
 
   echo "• installing nargo ${NOIR_VERSION}"
   curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | \
     NOIR_VERSION="${NOIR_VERSION}" bash
   export PATH="$HOME/.nargo/bin:$PATH"
-  [ -n "${GITHUB_PATH:-}" ] && echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
+  if [[ -n "${GITHUB_PATH:-}" ]]; then
+    echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
+  fi
   noirup -v "${NOIR_VERSION}"
 }
 
 install_bb() {
-  if command -v bb >/dev/null 2>&1; then return; fi
+  if command -v bb >/dev/null 2>&1 \
+    && bb_version_matches "$(bb --version)"; then
+    return
+  fi
 
-  echo "• installing bb ${BB_VERSION}"
+  echo "• installing bb ${BB_RELEASE_TAG}"
   mkdir -p "$HOME/.bb/bin"
 
   uname_s=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -88,7 +98,7 @@ install_bb() {
     *)             echo "unsupported platform"; exit 1 ;;
   esac
 
-  url="https://github.com/AztecProtocol/aztec-packages/releases/download/${BB_VERSION}/${file}"
+  url="https://github.com/AztecProtocol/aztec-packages/releases/download/${BB_RELEASE_TAG}/${file}"
   curl -L "$url" -o /tmp/bb.tar.gz
   # Verify the download before extracting, and fail closed. A warn-and-continue
   # check documents the supply-chain gap rather than closing it.
@@ -102,7 +112,9 @@ install_bb() {
   tar -xzf /tmp/bb.tar.gz -C "$HOME/.bb/bin"
   chmod +x "$HOME/.bb/bin/bb"
   export PATH="$HOME/.bb/bin:$PATH"
-  [ -n "${GITHUB_PATH:-}" ] && echo "$HOME/.bb/bin" >> "$GITHUB_PATH"
+  if [[ -n "${GITHUB_PATH:-}" ]]; then
+    echo "$HOME/.bb/bin" >> "$GITHUB_PATH"
+  fi
 }
 
 run_tornado_public_inputs_generation() {
@@ -126,7 +138,7 @@ run_tornado_public_inputs_generation() {
 build_circuit() {
   local name="$1"
   local dir="${ROOT}/${name}"
-  local nargo_bin bb_bin project_name json gz
+  local nargo_bin bb_bin nargo_version bb_version project_name json gz
 
   [[ -f "${dir}/Nargo.toml" ]] || {
     echo "skip ${name} (no Nargo.toml)"
@@ -178,6 +190,29 @@ build_circuit() {
     --output_path target \
     --output_format bytes_and_fields
 
+  # Generate a matching UltraKeccakZK proof alongside the legacy non-ZK
+  # fixture. The verification key is flavor-independent in bb v0.87, but is
+  # emitted into the companion directory to keep each fixture self-contained.
+  if [[ "${GENERATE_ZK:-1}" != "0" ]]; then
+    echo "=== Building ${name} (UltraKeccakZK) ==="
+    mkdir -p target/zk
+    "${bb_bin}" prove \
+      --scheme ultra_honk \
+      --oracle_hash keccak \
+      --zk \
+      --bytecode_path "${json}" \
+      --witness_path "${gz}" \
+      --output_path target/zk \
+      --output_format bytes_and_fields
+
+    "${bb_bin}" write_vk \
+      --scheme ultra_honk \
+      --oracle_hash keccak \
+      --bytecode_path "${json}" \
+      --output_path target/zk \
+      --output_format bytes_and_fields
+  fi
+
   if [[ "${name}" == "tornado" && "${GENERATE_PROVER:-1}" != "0" ]]; then
     echo "=== Generating E2E artifacts for tornado ==="
     (
@@ -195,6 +230,23 @@ build_circuit() {
       --witness_path "${gz}" \
       --output_path target/e2e \
       --output_format bytes_and_fields
+    if [[ "${GENERATE_ZK:-1}" != "0" ]]; then
+      mkdir -p target/e2e/zk
+      "${bb_bin}" prove \
+        --scheme ultra_honk \
+        --oracle_hash keccak \
+        --zk \
+        --bytecode_path "${json}" \
+        --witness_path "${gz}" \
+        --output_path target/e2e/zk \
+        --output_format bytes_and_fields
+      "${bb_bin}" write_vk \
+        --scheme ultra_honk \
+        --oracle_hash keccak \
+        --bytecode_path "${json}" \
+        --output_path target/e2e/zk \
+        --output_format bytes_and_fields
+    fi
   fi
 
   if [[ -d target/vk_fields.json && -f target/vk_fields.json/vk_fields.json ]]; then
