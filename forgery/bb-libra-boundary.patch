@@ -1,0 +1,105 @@
+diff -ruN a/barretenberg/cpp/src/barretenberg/bb/cli.cpp b/barretenberg/cpp/src/barretenberg/bb/cli.cpp
+--- a/barretenberg/cpp/src/barretenberg/bb/cli.cpp	2025-05-21 04:23:13
++++ b/barretenberg/cpp/src/barretenberg/bb/cli.cpp	2026-11-17 14:50:23
+@@ -29,7 +29,9 @@
+ namespace bb {
+ // This is updated in-place by bootstrap.sh during the release process. This prevents
+ // the version string from needing to be present at build-time, simplifying e.g. caching.
+-const char* const BB_VERSION_PLACEHOLDER = "00000000.00000000.00000000";
++// Libra-boundary build marker: identifies a binary that includes the SmallSubgroupIPA
++// boundary-opening fix (the extra Shplonk claim A(1) = 0).
++const char* const BB_VERSION_PLACEHOLDER = "0.87.0-libra-boundary";
+ 
+ // TODO(https://github.com/AztecProtocol/barretenberg/issues/1257): Remove unused/seemingly unnecessary flags.
+ // TODO(https://github.com/AztecProtocol/barretenberg/issues/1258): Improve defaults.
+diff -ruN a/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplemini.hpp b/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplemini.hpp
+--- a/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplemini.hpp	2025-05-21 04:23:13
++++ b/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplemini.hpp	2026-11-17 14:50:20
+@@ -98,6 +98,21 @@
+             new_claim.opening_pair.evaluation = new_claim.polynomial.evaluate(evaluation_points[idx]);
+             transcript->send_to_verifier(libra_eval_labels[idx], new_claim.opening_pair.evaluation);
+             libra_opening_claims.push_back(new_claim);
++
++            // Libra-boundary hardening: after the grand-sum claims and before the
++            // quotient claim, add the fixed boundary opening A(1) = 0. The
++            // evaluation is known to both sides, so nothing is sent on the
++            // transcript; the claim only enters the Shplonk quotient. It removes
++            // the one-dimensional kernel of the SmallSubgroupIPA identity at
++            // X = 1, which otherwise leaves the claimed Libra evaluation
++            // unconstrained.
++            if (idx == 2) {
++                OpeningClaim boundary_claim;
++                boundary_claim.polynomial = libra_polynomials[2]; // grand sum A
++                boundary_claim.opening_pair.challenge = FF(1);
++                boundary_claim.opening_pair.evaluation = FF(0);
++                libra_opening_claims.push_back(boundary_claim);
++            }
+         }
+ 
+         return libra_opening_claims;
+@@ -602,29 +617,39 @@
+             commitments.push_back(libra_commitments[idx]);
+         }
+ 
+-        // compute corresponding scalars and the correction to the constant term
+-        std::array<Fr, NUM_SMALL_IPA_EVALUATIONS> denominators;
+-        std::array<Fr, NUM_SMALL_IPA_EVALUATIONS> batching_scalars;
++        // compute corresponding scalars and the correction to the constant term.
++        // Libra-boundary hardening: the Shplonk batch carries five claims,
++        //   G(r), A(g*r), A(r), A(1) = 0, Q(r),
++        // where the fourth is the fixed boundary opening on the grand-sum
++        // commitment. Its evaluation is the known value zero, so it contributes
++        // no constant term; only the commitment scalar changes.
++        std::array<Fr, NUM_SMALL_IPA_EVALUATIONS + 1> denominators;
++        std::array<Fr, NUM_SMALL_IPA_EVALUATIONS + 1> batching_scalars;
+         // compute Shplonk denominators and invert them
+         denominators[0] = Fr(1) / (shplonk_evaluation_challenge - gemini_evaluation_challenge);
+         denominators[1] =
+             Fr(1) / (shplonk_evaluation_challenge - Fr(Curve::subgroup_generator) * gemini_evaluation_challenge);
+         denominators[2] = denominators[0];
+-        denominators[3] = denominators[0];
++        denominators[3] = Fr(1) / (shplonk_evaluation_challenge - Fr(1)); // boundary A(1) = 0
++        denominators[4] = denominators[0];
+ 
+-        // compute the scalars to be multiplied against the commitments [libra_concatenated], [grand_sum], [grand_sum],
+-        // and [libra_quotient]
+-        for (size_t idx = 0; idx < NUM_SMALL_IPA_EVALUATIONS; idx++) {
++        // compute the scalars to be multiplied against the commitments [libra_concatenated], [grand_sum],
++        // [grand_sum], [grand_sum] (boundary), and [libra_quotient]
++        for (size_t idx = 0; idx < NUM_SMALL_IPA_EVALUATIONS + 1; idx++) {
+             Fr scaling_factor = denominators[idx] *
+                                 shplonk_batching_challenge_powers[2 * virtual_log_n + NUM_INTERLEAVING_CLAIMS + idx];
+             batching_scalars[idx] = -scaling_factor;
+-            constant_term_accumulator += scaling_factor * libra_evaluations[idx];
++            // The boundary slot claims the fixed value 0; the others use the
++            // transmitted evaluations (G(r), A(g*r), A(r), Q(r)).
++            Fr evaluation = (idx == 3) ? Fr(0) : libra_evaluations[idx < 3 ? idx : idx - 1];
++            constant_term_accumulator += scaling_factor * evaluation;
+         }
+ 
+-        // to save a scalar mul, add the sum of the batching scalars corresponding to the big sum evaluations
++        // to save scalar muls, add the sum of the batching scalars corresponding to the
++        // grand-sum evaluations (including the boundary opening)
+         scalars.push_back(batching_scalars[0]);
+-        scalars.push_back(batching_scalars[1] + batching_scalars[2]);
+-        scalars.push_back(batching_scalars[3]);
++        scalars.push_back(batching_scalars[1] + batching_scalars[2] + batching_scalars[3]);
++        scalars.push_back(batching_scalars[4]);
+     }
+ 
+     /**
+diff -ruN a/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplonk.hpp b/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplonk.hpp
+--- a/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplonk.hpp	2025-05-21 04:23:13
++++ b/barretenberg/cpp/src/barretenberg/commitment_schemes/shplonk/shplonk.hpp	2026-11-17 14:50:10
+@@ -483,7 +483,10 @@
+ 
+     // Shplonk evaluation and batching challenges are re-used in SmallSubgroupIPA.
+     if (has_zk) {
+-        num_powers += NUM_SMALL_IPA_EVALUATIONS;
++        // Libra-boundary hardening: the SmallSubgroupIPA batch carries one extra
++        // claim beyond NUM_SMALL_IPA_EVALUATIONS, the fixed boundary opening
++        // A(1) = 0 on the grand-sum commitment.
++        num_powers += NUM_SMALL_IPA_EVALUATIONS + 1;
+     }
+ 
+     // Commited sumcheck adds 3 claims per round.
